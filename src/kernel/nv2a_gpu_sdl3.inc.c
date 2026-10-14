@@ -6,6 +6,9 @@
 
 #include <SDL3/SDL.h>
 #include "../input/xinput_xbox.h"
+#if defined(__linux__)
+#include "../platform/guest_memory.h"
+#endif
 
 extern void *xbox_FramebufferWindowHwnd(void);
 extern void  xbox_FramebufferSetGpuPresent(int on);
@@ -285,6 +288,10 @@ static struct {
     SDL_GPUTexture       *fb_tex;
     SDL_GPUTransferBuffer*fb_tbuf;
     uint32_t              fb_w, fb_h;
+#if defined(__linux__)
+    uint8_t              *fb_staging;
+    size_t                fb_staging_capacity;
+#endif
     SDL_GPUTexture       *hud_tex;
     SDL_GPUTransferBuffer*hud_tbuf;
     uint32_t              hud_w, hud_h;
@@ -331,11 +338,34 @@ static void sdl_pr_flip(void)
         xbox_FramebufferApplyMode(s_vs.mode, s_vs.res_w, s_vs.res_h);
     }
 
-    uint32_t w = s_gpu.clip_x + s_gpu.clip_w;
-    uint32_t h = s_gpu.clip_y + s_gpu.clip_h;
+    uint64_t width = (uint64_t)s_gpu.clip_x + s_gpu.clip_w;
+    uint64_t height = (uint64_t)s_gpu.clip_y + s_gpu.clip_h;
+    if (!width || !height || width > UINT32_MAX || height > UINT32_MAX) return;
+    uint32_t w = (uint32_t)width, h = (uint32_t)height;
     uint32_t pitch = s_gpu.pitch;
     uint32_t guest = dma_resolve(s_gpu.color_offset);
     if (!w || !h || !pitch || surface_bpp() != 4) return;
+    uint64_t row_bytes = width * 4;
+    /* SDL transfer-buffer sizes are Uint32. Validate before multiplication,
+     * allocation or guest-address arithmetic can wrap. */
+    if (row_bytes > pitch || height > UINT32_MAX / row_bytes) return;
+    size_t frame_bytes = (size_t)(row_bytes * height);
+#if defined(__linux__)
+    if (s_sdl_pr.fb_staging_capacity < frame_bytes) {
+        uint8_t *replacement = (uint8_t *)realloc(s_sdl_pr.fb_staging, frame_bytes);
+        if (!replacement) return;
+        s_sdl_pr.fb_staging = replacement;
+        s_sdl_pr.fb_staging_capacity = frame_bytes;
+    }
+    uintptr_t base = (uintptr_t)xbox_GetMemoryOffset();
+    for (uint32_t y = 0; y < h; ++y) {
+        /* A partial checked read is discarded: no SDL buffer is touched until
+         * every guest row has been staged successfully in ordinary host RAM. */
+        if (!xbox_guest_memory_read(base, (uint64_t)guest + (uint64_t)y * pitch,
+                s_sdl_pr.fb_staging + (size_t)y * (size_t)row_bytes, (size_t)row_bytes))
+            return;
+    }
+#endif
 
     if (!s_sdl_pr.fb_tex || s_sdl_pr.fb_w != w || s_sdl_pr.fb_h != h) {
         if (s_sdl_pr.fb_tex)  SDL_ReleaseGPUTexture(s_sdl_pr.gpu, s_sdl_pr.fb_tex);
@@ -355,7 +385,7 @@ static void sdl_pr_flip(void)
         SDL_GPUTransferBufferCreateInfo tbci;
         SDL_zero(tbci);
         tbci.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
-        tbci.size  = w * h * 4;
+        tbci.size  = (Uint32)frame_bytes;
         s_sdl_pr.fb_tbuf = SDL_CreateGPUTransferBuffer(s_sdl_pr.gpu, &tbci);
 
         s_sdl_pr.fb_w = w;
@@ -364,14 +394,19 @@ static void sdl_pr_flip(void)
 
     if (!s_sdl_pr.fb_tex || !s_sdl_pr.fb_tbuf) return;
 
-    const uint8_t *src = (const uint8_t *)xbox_GetMemoryOffset() + guest;
     uint8_t *mapped = (uint8_t *)SDL_MapGPUTransferBuffer(s_sdl_pr.gpu, s_sdl_pr.fb_tbuf, true);
-    if (mapped) {
+    if (!mapped) return;
+#if defined(__linux__)
+    memcpy(mapped, s_sdl_pr.fb_staging, frame_bytes);
+#else
+    {
+        const uint8_t *src = (const uint8_t *)xbox_GetMemoryOffset() + guest;
         for (uint32_t y = 0; y < h; y++) {
             memcpy(mapped + (size_t)y * w * 4, src + (size_t)y * pitch, (size_t)w * 4);
         }
-        SDL_UnmapGPUTransferBuffer(s_sdl_pr.gpu, s_sdl_pr.fb_tbuf);
     }
+#endif
+    SDL_UnmapGPUTransferBuffer(s_sdl_pr.gpu, s_sdl_pr.fb_tbuf);
 
     SDL_GPUCommandBuffer *cmd = SDL_AcquireGPUCommandBuffer(s_sdl_pr.gpu);
     if (!cmd) return;
