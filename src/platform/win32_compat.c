@@ -205,14 +205,28 @@ BOOL InitOnceExecuteOnce(PINIT_ONCE once, PINIT_ONCE_FN fn, PVOID param, PVOID *
 /* Forward decl; the definition lives further down with the wait helpers. */
 static void deadline_from_ms(DWORD ms, struct timespec *ts);
 
-static void cv_lazy_init(PCONDITION_VARIABLE cv)
+typedef struct {
+    pthread_cond_t condition;
+    pthread_mutex_t srw_gate;
+} w32_condition;
+
+static w32_condition *cv_lazy_init(PCONDITION_VARIABLE cv)
 {
-    if (!cv->Ptr) {
-        pthread_cond_t *c = (pthread_cond_t *)malloc(sizeof(pthread_cond_t));
-        pthread_cond_init(c, NULL);
-        /* Race window OK for typical Win32 usage (the CS is held). */
-        cv->Ptr = c;
+    w32_condition *value = __atomic_load_n((w32_condition **)&cv->Ptr, __ATOMIC_ACQUIRE);
+    if (!value) {
+        static pthread_mutex_t init_lock = PTHREAD_MUTEX_INITIALIZER;
+        pthread_mutex_lock(&init_lock);
+        value = (w32_condition *)cv->Ptr;
+        if (!value) {
+            value = (w32_condition *)malloc(sizeof(*value));
+            if (!value) abort();
+            pthread_cond_init(&value->condition, NULL);
+            pthread_mutex_init(&value->srw_gate, NULL);
+            __atomic_store_n((w32_condition **)&cv->Ptr, value, __ATOMIC_RELEASE);
+        }
+        pthread_mutex_unlock(&init_lock);
     }
+    return value;
 }
 
 VOID InitializeConditionVariable(PCONDITION_VARIABLE cv)
@@ -223,31 +237,60 @@ VOID InitializeConditionVariable(PCONDITION_VARIABLE cv)
 
 BOOL SleepConditionVariableCS(PCONDITION_VARIABLE cv, PCRITICAL_SECTION cs, DWORD ms)
 {
-    cv_lazy_init(cv);
+    w32_condition *value = cv_lazy_init(cv);
     if (!cs->LockSemaphore) InitializeCriticalSection(cs);
-    pthread_cond_t  *c = (pthread_cond_t  *)cv->Ptr;
-    pthread_mutex_t *m = (pthread_mutex_t *)cs->LockSemaphore;
-    if (ms == INFINITE) {
-        pthread_cond_wait(c, m);
-        return TRUE;
+    pthread_mutex_t *mutex = (pthread_mutex_t *)cs->LockSemaphore;
+    int rc;
+    if (ms == INFINITE) rc = pthread_cond_wait(&value->condition, mutex);
+    else {
+        struct timespec deadline;
+        deadline_from_ms(ms, &deadline);
+        rc = pthread_cond_timedwait(&value->condition, mutex, &deadline);
     }
-    struct timespec ts;
-    deadline_from_ms(ms, &ts);
-    int rc = pthread_cond_timedwait(c, m, &ts);
-    if (rc == ETIMEDOUT) { SetLastError(WAIT_TIMEOUT); return FALSE; }
+    if (rc) { SetLastError(rc == ETIMEDOUT ? ERROR_TIMEOUT : ERROR_GEN_FAILURE); return FALSE; }
+    return TRUE;
+}
+
+BOOL SleepConditionVariableSRW(PCONDITION_VARIABLE cv, PSRWLOCK lock, DWORD ms, ULONG flags)
+{
+    if (flags != 0 && flags != CONDITION_VARIABLE_LOCKMODE_SHARED) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    w32_condition *value = cv_lazy_init(cv);
+    pthread_rwlock_t *rw = srw_lazy_init(lock);
+    // The gate keeps a wake from crossing the release-to-wait interval.
+    pthread_mutex_lock(&value->srw_gate);
+    pthread_rwlock_unlock(rw);
+    int rc;
+    if (ms == INFINITE) rc = pthread_cond_wait(&value->condition, &value->srw_gate);
+    else {
+        struct timespec deadline;
+        deadline_from_ms(ms, &deadline);
+        rc = pthread_cond_timedwait(&value->condition, &value->srw_gate, &deadline);
+    }
+    // Never reacquire the SRW lock while holding the gate: its owner may wake again.
+    pthread_mutex_unlock(&value->srw_gate);
+    if (flags == CONDITION_VARIABLE_LOCKMODE_SHARED) pthread_rwlock_rdlock(rw);
+    else pthread_rwlock_wrlock(rw);
+    if (rc) { SetLastError(rc == ETIMEDOUT ? ERROR_TIMEOUT : ERROR_GEN_FAILURE); return FALSE; }
     return TRUE;
 }
 
 VOID WakeConditionVariable(PCONDITION_VARIABLE cv)
 {
-    cv_lazy_init(cv);
-    pthread_cond_signal((pthread_cond_t *)cv->Ptr);
+    w32_condition *value = cv_lazy_init(cv);
+    pthread_mutex_lock(&value->srw_gate);
+    pthread_cond_signal(&value->condition);
+    pthread_mutex_unlock(&value->srw_gate);
 }
 
 VOID WakeAllConditionVariable(PCONDITION_VARIABLE cv)
 {
-    cv_lazy_init(cv);
-    pthread_cond_broadcast((pthread_cond_t *)cv->Ptr);
+    w32_condition *value = cv_lazy_init(cv);
+    pthread_mutex_lock(&value->srw_gate);
+    pthread_cond_broadcast(&value->condition);
+    pthread_mutex_unlock(&value->srw_gate);
 }
 
 /* ===================================================================== */
@@ -828,7 +871,12 @@ int GetThreadPriority(HANDLE h)
     return (o && o->kind == K_THREAD) ? o->priority : THREAD_PRIORITY_NORMAL;
 }
 
-VOID SwitchToThread(void) { sched_yield(); }
+BOOL SwitchToThread(void)
+{
+    sched_yield();
+    /* POSIX does not report whether another thread ran. Do not claim a handoff. */
+    return FALSE;
+}
 
 DWORD QueueUserAPC(PAPCFUNC func, HANDLE thread, ULONG_PTR data)
 {
@@ -1604,7 +1652,7 @@ static int anon_map_fd(const char *name)
     char shm_name[32];
     LONG seq = InterlockedIncrement(&map_counter);
     const char *base = name ? name : "xbox_map";
-    snprintf(shm_name, sizeof(shm_name), "/%s_%ld", base, seq);
+    snprintf(shm_name, sizeof(shm_name), "/%s_%ld", base, (long)seq);
     int fd = shm_open(shm_name, O_CREAT | O_RDWR | O_EXCL, 0600);
     if (fd >= 0) shm_unlink(shm_name);
     return fd;

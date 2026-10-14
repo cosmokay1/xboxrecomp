@@ -1,11 +1,18 @@
 /* Global guest lock -- see xbox_ggl.h for why. */
 #define XBOX_GGL_IMPL
-#include <windows.h>
+#include "../platform/xbox_winnt.h"
+#if defined(_WIN32)
 #include <dbghelp.h>
+#else
+#include "../platform/win32_compat.h"
+#endif
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include "xbox_ggl.h"
+#if defined(_WIN32)
 #pragma comment(lib, "dbghelp.lib")
+#endif
 
 static int g_enabled = -1;
 static SRWLOCK g_lock = SRWLOCK_INIT;
@@ -21,18 +28,20 @@ static unsigned long long g_next_seq;
 static struct { DWORD tid; int prio; unsigned long long seq; } g_wait[GGL_MAX_WAITERS];
 static int g_nwait;
 static volatile LONG g_best_waiting_prio = -1000;
-static __declspec(thread) int t_prio;
+static XBOX_THREAD_LOCAL int t_prio;
 static volatile DWORD g_owner;
 static volatile LONGLONG g_owner_since;      /* QPC when the owner got the lock */
 static volatile LONGLONG g_owner_last_point; /* QPC of its last kernel call */
 static volatile unsigned int g_owner_last_site; /* guest return address of that call */
 static LONGLONG g_qpc_freq, g_quantum_ticks;
 
-static __declspec(thread) int t_depth;
+static XBOX_THREAD_LOCAL int t_depth;
 
 /* Resolve the native instruction where a stalled guest-lock owner is
  * actually spinning.  The last kernel return site only identifies the most
  * recent service call and can be far from the bad generated branch. */
+/* Native PC/symbol inspection uses the Windows debugger API only. */
+#if defined(_WIN32)
 static void ggl_report_owner_pc(DWORD tid)
 {
     HANDLE thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT |
@@ -81,11 +90,13 @@ static void ggl_report_owner_pc(DWORD tid)
     fflush(stderr);
 }
 
+#endif /* _WIN32 native PC diagnostics */
+
 /* Per-thread accounting, reported by the watchdog every 10 s: how long each
  * guest thread held the guest CPU and how long it queued for it. */
 #define GGL_STAT_SLOTS 32
 static struct { volatile DWORD tid; volatile LONGLONG held, waited; volatile LONG grants; } g_stat[GGL_STAT_SLOTS];
-static __declspec(thread) int t_stat = -1;
+static XBOX_THREAD_LOCAL int t_stat = -1;
 
 static int ggl_stat_slot(void)
 {
@@ -128,9 +139,9 @@ static DWORD WINAPI ggl_watchdog(LPVOID unused)
             fprintf(stderr, "  [GGL] stats (ms held / ms waiting / grants):");
             for (int i = 0; i < GGL_STAT_SLOTS; i++)
                 if (g_stat[i].tid && g_stat[i].grants)
-                    fprintf(stderr, " t%lu=%lld/%lld/%ld", g_stat[i].tid,
+                    fprintf(stderr, " t%lu=%lld/%lld/%ld", (unsigned long)g_stat[i].tid,
                             g_stat[i].held * 1000 / g_qpc_freq,
-                            g_stat[i].waited * 1000 / g_qpc_freq, g_stat[i].grants);
+                            g_stat[i].waited * 1000 / g_qpc_freq, (long)g_stat[i].grants);
             fprintf(stderr, "\n");
             fflush(stderr);
         }
@@ -145,9 +156,11 @@ static DWORD WINAPI ggl_watchdog(LPVOID unused)
                 if (++stalled_s == 10) {
                     fprintf(stderr, "  [GGL] STALL: no grants for 10 s; owner=%lu waiters=%ld "
                                     "best waiting prio=%ld last kernel call returned to guest 0x%08X\n",
-                            g_owner, g_waiters, g_best_waiting_prio, g_owner_last_site);
+                            (unsigned long)g_owner, (long)g_waiters, (long)g_best_waiting_prio, g_owner_last_site);
                     fflush(stderr);
+#if defined(_WIN32)
                     if (g_owner) ggl_report_owner_pc(g_owner);
+#endif
                     WakeAllConditionVariable(&g_turn);
                 }
             } else {
@@ -163,7 +176,7 @@ static DWORD WINAPI ggl_watchdog(LPVOID unused)
             fprintf(stderr, "  [GGL] thread %lu has held the guest CPU for %lld ms "
                             "without a kernel call (last one returned to guest 0x%08X); "
                             "%ld thread(s) waiting -- a guest spin loop the lock cannot preempt?\n",
-                    owner, ms, g_owner_last_site, g_waiters);
+                    (unsigned long)owner, ms, g_owner_last_site, (long)g_waiters);
             fflush(stderr);
             reported = owner;
         }
@@ -199,7 +212,7 @@ int xbox_ggl_enabled(void)
     return g_enabled;
 }
 
-static __declspec(thread) LONGLONG t_acquired_at;
+static XBOX_THREAD_LOCAL LONGLONG t_acquired_at;
 
 /* Caller holds g_lock. */
 static void ggl_update_best(void)

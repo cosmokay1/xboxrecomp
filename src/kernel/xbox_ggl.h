@@ -44,7 +44,11 @@ void xbox_ggl_preempt_point(unsigned int guest_site); /* kernel-call boundary: m
 void xbox_ggl_set_priority(int prio); /* this thread; higher wins, default 0 */
 
 #ifndef XBOX_GGL_IMPL
+#if defined(_WIN32)
 #include <windows.h>
+#else
+#include "../platform/win32_compat.h"
+#endif
 void  xbox_ggl_Sleep(DWORD ms);
 DWORD xbox_ggl_SleepEx(DWORD ms, BOOL alertable);
 BOOL  xbox_ggl_SwitchToThread(void);
