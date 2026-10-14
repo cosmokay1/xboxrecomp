@@ -4,6 +4,10 @@
  * routes them through the NV2A register handlers, and advances RIP.
  */
 
+#if !defined(_WIN32) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
+
 #include "nv2a_mmio_hook.h"
 #include "nv2a_state.h"
 #include <stdio.h>
