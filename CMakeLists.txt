@@ -1,8 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 project(xboxrecomp VERSION 0.9.0 LANGUAGES C)
-if(NOT WIN32)
-    find_package(SDL3 REQUIRED)
-endif()
+find_package(SDL3 REQUIRED)
 
 # Xbox Static Recompilation Runtime Library
 # Provides link-time libraries for statically recompiled Xbox games.

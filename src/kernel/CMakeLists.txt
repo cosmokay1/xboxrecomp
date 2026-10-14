@@ -26,10 +26,10 @@ set(KERNEL_SOURCES
     recomp_trace.c
     nv2a_pb_scan.c
     nv2a_pb_exec.c
-        nv2a_gpu_sdl3.inc.c
 )
 
 add_library(xbox_kernel STATIC ${KERNEL_SOURCES})
+target_link_libraries(xbox_kernel PUBLIC SDL3::SDL3)
 
 # See src/platform/CMakeLists.txt: resolve src/ relative to this file, not via
 # CMAKE_SOURCE_DIR, which is the consuming project's root under add_subdirectory().

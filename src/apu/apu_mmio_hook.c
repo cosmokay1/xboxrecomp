@@ -3,6 +3,10 @@
  * Supports Windows (VEH PCONTEXT) and Linux (POSIX sigaction ucontext_t).
  */
 
+#if !defined(_WIN32) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
+
 #include "apu.h"
 #include <stdio.h>
 #include <stdlib.h>

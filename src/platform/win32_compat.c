@@ -17,6 +17,10 @@
 
 #include "win32_compat.h"
 
+/* VirtualAlloc/VirtualFree use the mapping registry defined below. */
+void view_register(void *addr, size_t len);
+size_t view_take(const void *addr);
+
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
