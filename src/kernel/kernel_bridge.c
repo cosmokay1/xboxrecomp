@@ -90,6 +90,8 @@ static bridge_guest_dpc g_pending_dpcs[BRIDGE_PENDING_DPCS];
 static volatile LONG g_pending_dpc_head, g_pending_dpc_tail;
 static CRITICAL_SECTION g_pending_dpc_lock;
 static INIT_ONCE g_pending_dpc_once = INIT_ONCE_STATIC_INIT;
+static HANDLE g_kernel_timer_thread;
+static volatile LONG g_kernel_timer_running;
 static HANDLE g_scheduler_tick_timer;
 static HANDLE g_scheduler_tick_event;
 static volatile LONG g_scheduler_tick_pending;
@@ -2818,7 +2820,7 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
      * g_pending_dpcs queue xbox_bridge_drain_guest_dpcs already drains
      * elsewhere -- one DPC queue, not two). Started unconditionally from
      * xbox_kernel_bridge_init. */
-    for (;;) {
+    while (InterlockedCompareExchange(&g_kernel_timer_running, 0, 0)) {
         /* Woken early when the APU raises its interrupt (xbox_kernel_irq_wake). */
         /* ...and at the next vblank deadline, not at a 10 ms poll. Polled,
          * vblanks landed 10 or 20 ms apart (deadline 16.7 seen at 20, 33.3
@@ -2855,6 +2857,10 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
         { static int named; if (!named && xbox_ggl_enabled()) { named = 1; fprintf(stderr, "  [GGL] timer/DPC thread %lu\n", GetCurrentThreadId()); } }
         xbox_ggl_set_priority(100);  /* ISRs/DPCs preempt threads, as on hardware */
         xbox_ggl_enter();      /* the ISR and DPCs are guest code */
+        if (!InterlockedCompareExchange(&g_kernel_timer_running, 0, 0)) {
+            xbox_ggl_leave();
+            break;
+        }
         kernel_vblank_tick();  /* the GPU's frame clock */
         {
             /* The APU's interrupt (vector 5: DirectSound's ISR, NFL 2K5
@@ -2872,6 +2878,7 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
         xbox_bridge_drain_guest_dpcs();
         xbox_ggl_leave();
     }
+    return 0;
 }
 
 static void bridge_KeSetTimer(void)
@@ -9961,7 +9968,12 @@ void xbox_kernel_bridge_init(void)
      * xbox_bridge_drain_guest_dpcs at ~100 Hz. Used to start lazily from
      * kernel_set_timer's first call; that table is gone now (see
      * bridge_KeSetTimer), so start it here, unconditionally, instead. */
-    CloseHandle(CreateThread(NULL, 0, kernel_timer_thread, NULL, 0, NULL));
+    if (!g_kernel_timer_thread) {
+        InterlockedExchange(&g_kernel_timer_running, 1);
+        g_kernel_timer_thread = CreateThread(NULL, 0, kernel_timer_thread, NULL, 0, NULL);
+        if (!g_kernel_timer_thread)
+            InterlockedExchange(&g_kernel_timer_running, 0);
+    }
 
     for (i = 0; i < g_thunk_table_count; i++) {
         uint32_t va = g_thunk_table_base + i * 4;
@@ -10092,6 +10104,15 @@ void xbox_kernel_bridge_init(void)
 
 void xbox_kernel_bridge_shutdown(void)
 {
+    /* The timer/DPC thread accesses guest RAM. Join it before the caller
+     * releases that RAM, including validation runs with no guest entry. */
+    InterlockedExchange(&g_kernel_timer_running, 0);
+    xbox_ggl_release_all();
+    if (g_kernel_timer_thread) {
+        WaitForSingleObject(g_kernel_timer_thread, INFINITE);
+        CloseHandle(g_kernel_timer_thread);
+        g_kernel_timer_thread = NULL;
+    }
     HANDLE timer = g_scheduler_tick_timer;
     g_scheduler_tick_timer = NULL;
     if (timer)

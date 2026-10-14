@@ -1863,6 +1863,10 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
         /* Reserve base + mirrors as one range, and map the base at its head.
          * VirtualFree releases just the slice about to be used, so each view
          * replaces our own reservation rather than racing for free space. */
+#ifndef _WIN32
+        /* The POSIX shim can release individual slices of a reservation.
+         * Windows MEM_RELEASE requires size zero and releases the whole
+         * reservation; use the fixed-base views below on Windows. */
         g_span_size = g_memory_size * (size_t)(1 + XBOX_NUM_MIRRORS);
         g_span_base = VirtualAlloc(NULL, g_span_size, MEM_RESERVE, PAGE_NOACCESS);
         if (g_span_base) {
@@ -1877,6 +1881,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
             }
         }
 
+#endif
         const size_t n_bases = sizeof(try_bases) / sizeof(try_bases[0]);
         for (size_t i = 0; !g_memory_base && i < n_bases; i++) {
             LPVOID hint = try_bases[i] ? (LPVOID)try_bases[i] : NULL;
@@ -2720,6 +2725,11 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
                 tiled_size,
                 (LPVOID)tiled_native)
             : NULL;
+        if (g_tiled_view && !g_contig_memory) {
+            fprintf(stderr, "xbox_MemoryLayoutInit: contiguous window unavailable;"
+                            " cannot verify tiled alias\n");
+            return FALSE;
+        }
         if (g_tiled_view) {
             /* Prove the alias rather than assert it. Everything the title
              * renders goes through this window and is read back through the
