@@ -1,3 +1,6 @@
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
 /**
  * Xbox Memory Layout Implementation
  *
@@ -24,6 +27,11 @@
 #include <setjmp.h>
 #if !defined(_WIN32)
 #include <unistd.h>   /* _exit */
+#if defined(__linux__) && defined(__x86_64__)
+#include <signal.h>
+#include <sys/mman.h>
+#include <ucontext.h>
+#endif
 #endif
 
 /* XBE header field offsets (per xboxdevwiki.net/Xbe) */
@@ -354,7 +362,11 @@ static const struct { uint32_t offset; uint32_t idle_mask; } NV2A_IDLE[] = {
 #define AC97_RR           0x02u
 
 static void *g_ac97_page = NULL;      /* host address of the trapped page */
+#if defined(_WIN32)
 static void *g_ac97_veh  = NULL;
+#else
+static int g_ac97_posix_handler_ready;
+#endif
 static RECOMP_TLS int s_ac97_stepping = 0;
 
 static void ac97_clear_reset_bits(void)
@@ -377,6 +389,7 @@ static void ac97_clear_reset_bits(void)
     }
 }
 
+#if defined(_WIN32)
 static LONG CALLBACK ac97_write_veh(PEXCEPTION_POINTERS ep)
 {
     DWORD code = ep->ExceptionRecord->ExceptionCode;
@@ -415,16 +428,57 @@ static LONG CALLBACK ac97_write_veh(PEXCEPTION_POINTERS ep)
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
+#else
+void xbox_ac97_set_posix_handler_ready(BOOL ready)
+{
+    /* Startup registration only; no page is protected until both dispatchers exist. */
+    g_ac97_posix_handler_ready = ready != FALSE;
+}
+
+BOOL xbox_ac97_handle_posix_signal(int signal_number, int signal_code, uintptr_t fault_address, void *raw_context)
+{
+#if defined(__linux__) && defined(__x86_64__)
+    if (!g_ac97_page || !raw_context) return FALSE;
+    ucontext_t *context = (ucontext_t *)raw_context;
+    if (signal_number == SIGTRAP && signal_code == TRAP_TRACE && s_ac97_stepping) {
+        /* Only our write sets stepping. Leave unrelated debugger traps untouched. */
+        ac97_clear_reset_bits();
+        if (mprotect(g_ac97_page, AC97_TRAP_BYTES, PROT_READ) != 0)
+            _exit(3); /* Cannot safely resume with writable reset registers. */
+        s_ac97_stepping = 0;
+        context->uc_mcontext.gregs[REG_EFL] &= ~(greg_t)0x100u;
+        return TRUE;
+    }
+    if (signal_number == SIGSEGV && signal_code == SEGV_ACCERR && !s_ac97_stepping
+            && (context->uc_mcontext.gregs[REG_ERR] & 2)
+            /* Never borrow an already active debugger single-step state. */
+            && !(context->uc_mcontext.gregs[REG_EFL] & 0x100u)
+            && fault_address >= (uintptr_t)g_ac97_page
+            && fault_address - (uintptr_t)g_ac97_page < AC97_TRAP_BYTES) {
+        if (mprotect(g_ac97_page, AC97_TRAP_BYTES, PROT_READ | PROT_WRITE) != 0)
+            return FALSE;
+        s_ac97_stepping = 1;
+        context->uc_mcontext.gregs[REG_EFL] |= (greg_t)0x100u;
+        return TRUE;
+    }
+#else
+    (void)signal_number; (void)signal_code; (void)fault_address; (void)raw_context;
+#endif
+    return FALSE;
+}
+#endif
+
 /* Arm the trap. Called once the MCPX aperture exists, and only alongside the
  * rest of RECOMP_AC97_READY: a title that never gets as far as resetting a
  * channel has nothing to gain from it, and the page fault costs something. */
-static void ac97_arm_write_trap(void)
+static BOOL ac97_arm_write_trap(void)
 {
     DWORD old;
 
     if (!g_mcpx_memory || g_ac97_page)
-        return;
+        return g_ac97_page != NULL;
     g_ac97_page = (char *)g_mcpx_memory + AC97_NABM_OFFSET;
+#if defined(_WIN32)
     /* First, so it runs before the game target's own crash reporter, which
      * would otherwise print the write as an access violation. */
     g_ac97_veh = AddVectoredExceptionHandler(1, ac97_write_veh);
@@ -438,11 +492,23 @@ static void ac97_arm_write_trap(void)
         g_ac97_page = NULL;
         fprintf(stderr, "  AC97: could not arm the bus-master write trap;"
                         " a channel reset will spin\n");
-        return;
+        return FALSE;
     }
+#else
+#if defined(__linux__) && defined(__x86_64__)
+    if (!g_ac97_posix_handler_ready || mprotect(g_ac97_page, AC97_TRAP_BYTES, PROT_READ) != 0) {
+#else
+    if (1) { /* No verified single-step context implementation for this host. */
+#endif
+        g_ac97_page = NULL;
+        fprintf(stderr, "  AC97: POSIX reset trap requires installed dispatchers and protected page\n");
+        return FALSE;
+    }
+#endif
     fprintf(stderr, "  AC97: bus-master writes trapped at 0x%08X"
                     " (channel reset completes on write)\n",
             XBOX_MCPX_BASE + AC97_NABM_OFFSET);
+    return TRUE;
 }
 
 static const uint32_t MCPX_COUNTERS[] = {
@@ -2458,7 +2524,11 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
                     |= MCPX_AC97_CODEC_READY;
                 /* Before the trap is armed: this write would otherwise be
                  * the first thing to fault. */
+#if defined(_WIN32)
                 ac97_arm_write_trap();
+#else
+                if (!ac97_arm_write_trap()) return FALSE;
+#endif
                 fprintf(stderr, "  AC97: codec reported ready at 0x%08X"
                                 " (DirectSound will initialise)\n",
                         XBOX_MCPX_BASE + MCPX_AC97_CODEC_STATUS);
@@ -2765,6 +2835,11 @@ void xbox_MemoryLayoutShutdown(void)
         g_contig_memory = NULL;
     }
     if (g_mcpx_memory) {
+#if defined(_WIN32)
+        if (g_ac97_veh) { RemoveVectoredExceptionHandler(g_ac97_veh); g_ac97_veh = NULL; }
+#endif
+        g_ac97_page = NULL;
+        s_ac97_stepping = 0;
         VirtualFree(g_mcpx_memory, 0, MEM_RELEASE);
         g_mcpx_memory = NULL;
     }

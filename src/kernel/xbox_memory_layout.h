@@ -126,6 +126,13 @@ void xbox_SetTotalRam(size_t bytes);
  * @param xbe_size  Size of the XBE file.
  * @return TRUE on success, FALSE on failure.
  */
+#if !defined(_WIN32)
+/* Host owns SIGSEGV/SIGTRAP installation and previous-handler chaining.
+ * Register before memory initialization; dispatch AC97 before APU faults. */
+void xbox_ac97_set_posix_handler_ready(BOOL ready);
+BOOL xbox_ac97_handle_posix_signal(int signal_number, int signal_code, uintptr_t fault_address, void *raw_context);
+#endif
+
 BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size);
 
 /**
