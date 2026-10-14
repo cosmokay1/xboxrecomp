@@ -2832,9 +2832,11 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
             LONGLONG due = kernel_vblank_due_100ns();
             if (!vbl_tried) {
                 vbl_tried = 1;
+#ifdef _WIN32
                 vbl_timer = CreateWaitableTimerExW(NULL, NULL, 0x00000002 /* CREATE_WAITABLE_TIMER_HIGH_RESOLUTION */,
                                                    TIMER_ALL_ACCESS);
                 if (!vbl_timer)
+#endif
                     vbl_timer = CreateWaitableTimerW(NULL, FALSE, NULL);
             }
             if (due > 0 && vbl_timer) {
@@ -3344,9 +3346,12 @@ static void bridge_NtCreateFile(void)
         extern uint32_t xbox_LastFileError(void);
         uint32_t _e = g_eax ? xbox_LastFileError() : 0u;
         const wchar_t *_last_path = xbox_LastHostPath();
-        size_t _last_len = _last_path ? wcslen(_last_path) : 0u;
+        size_t _last_len = 0u;
+        if (_last_path) while (_last_path[_last_len]) ++_last_len;
         int _quiet_cache_probe = !getenv("RECOMP_FILE_TRACE") &&
-            _last_len >= 3u && _wcsicmp(_last_path + _last_len - 3u, L".uh") == 0;
+            _last_len >= 3u && _last_path[_last_len - 3u] == L'.' &&
+            (_last_path[_last_len - 2u] == L'u' || _last_path[_last_len - 2u] == L'U') &&
+            (_last_path[_last_len - 1u] == L'h' || _last_path[_last_len - 1u] == L'H');
         if (g_eax && !_quiet_cache_probe)
             fprintf(stderr, "  [FILE] -> 0x%08X FAILED path='%ls' (win32 err=%u%s)\n",
                     g_eax, _last_path ? _last_path : L"", _e,
