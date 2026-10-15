@@ -30,12 +30,16 @@
  */
 #ifndef XBOX_GGL_H
 #define XBOX_GGL_H
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 int  xbox_ggl_enabled(void);
+/* Nonblocking observation only. Zero unless this thread currently holds the
+ * enabled guest lock; a full release/reacquire changes the serial. Not a pin. */
+uint64_t xbox_ggl_current_serial(void);
 void xbox_ggl_enter(void);          /* take (recursive) */
 void xbox_ggl_leave(void);          /* drop one level */
 int  xbox_ggl_release_all(void);    /* drop every level, return the depth */

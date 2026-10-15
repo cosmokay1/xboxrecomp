@@ -36,6 +36,13 @@ static volatile unsigned int g_owner_last_site; /* guest return address of that 
 static LONGLONG g_qpc_freq, g_quantum_ticks;
 
 static XBOX_THREAD_LOCAL int t_depth;
+static XBOX_THREAD_LOCAL uint64_t t_acquisition_serial;
+static uint64_t g_acquisition_serial; /* guarded by g_lock; never reused */
+
+uint64_t xbox_ggl_current_serial(void)
+{
+    return t_depth>0 && g_enabled==1 && g_owner==GetCurrentThreadId() ? t_acquisition_serial : 0;
+}
 
 /* Resolve the native instruction where a stalled guest-lock owner is
  * actually spinning.  The last kernel return site only identifies the most
@@ -254,6 +261,7 @@ static void ggl_acquire_raw(void)
             if (g_wait[i].tid == tid) { g_wait[i] = g_wait[--g_nwait]; break; }
         ggl_update_best();
     }
+    t_acquisition_serial = g_acquisition_serial==UINT64_MAX ? 0 : ++g_acquisition_serial;
     g_owner = tid;
     g_owner_since = g_owner_last_point = t_acquired_at = qpc_now();
     ReleaseSRWLockExclusive(&g_lock);
