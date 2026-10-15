@@ -892,6 +892,13 @@ NTSTATUS __stdcall xbox_NtCreateFile(
     if (fd < 0) {
         int e = errno;
         XBOX_TRACE(XBOX_LOG_FILE, "NtCreateFile FAILED: %s (errno=%d)", host_path, e);
+        {   /* visible without a trace build: the first misses explain most boot failures */
+            static int shown;
+            if (shown < 64) {
+                shown++;
+                fprintf(stderr, "  [FILE] open failed: %s -> %s (%s)\n", xbox_path, host_path, strerror(e));
+            }
+        }
         if (IoStatusBlock) {
             IoStatusBlock->Status = STATUS_OBJECT_NAME_NOT_FOUND;
             IoStatusBlock->Information = 0;

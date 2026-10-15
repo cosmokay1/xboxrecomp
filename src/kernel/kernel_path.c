@@ -676,6 +676,56 @@ static int title_dir_path(const char *xbox_path, char *out, DWORD n)
     return 0;
 }
 
+/* Xbox (FATX) and Windows (NTFS) paths are case-insensitive; Linux is not.
+ * Titles name the same file with different capitalisation than the disc
+ * folder has ("D:\VC_53450030" vs vc_53450030), so a miss is resolved one
+ * component at a time against the real directory entries. Exact hits cost
+ * one stat(). A component that exists under no capitalisation is left as
+ * given, with everything after it, so files being created keep their name. */
+#include <dirent.h>
+static void resolve_case(char *path, size_t cap)
+{
+    struct stat st;
+    char out[MAX_PATH], rest[MAX_PATH];
+    char *comp, *save = NULL;
+    size_t len;
+    if (!path[0] || stat(path, &st) == 0) return;
+    snprintf(rest, sizeof rest, "%s", path);
+    out[0] = 0;
+    if (rest[0] == '/') snprintf(out, sizeof out, "/");
+    for (comp = strtok_r(rest, "/", &save); comp; comp = strtok_r(NULL, "/", &save)) {
+        char probe[MAX_PATH];
+        len = strlen(out);
+        snprintf(probe, sizeof probe, "%s%s%s", out, (len && out[len - 1] != '/') ? "/" : "", comp);
+        if (lstat(probe, &st) != 0) {
+            DIR *d = opendir(len ? out : ".");
+            struct dirent *e;
+            int found = 0;
+            if (d) {
+                while ((e = readdir(d)) != NULL) {
+                    if (!strcasecmp(e->d_name, comp)) {
+                        snprintf(probe, sizeof probe, "%s%s%s", out,
+                                 (len && out[len - 1] != '/') ? "/" : "", e->d_name);
+                        found = 1;
+                        break;
+                    }
+                }
+                closedir(d);
+            }
+            if (!found) {
+                /* Keep this component and the remainder as given. */
+                const char *tail = path + (comp - rest);
+                snprintf(probe, sizeof probe, "%s%s%s", out,
+                         (len && out[len - 1] != '/') ? "/" : "", tail);
+                snprintf(out, sizeof out, "%s", probe);
+                break;
+            }
+        }
+        snprintf(out, sizeof out, "%s", probe);
+    }
+    if (strlen(out) < cap) memcpy(path, out, strlen(out) + 1);
+}
+
 BOOL xbox_translate_path(const char* xbox_path, xbox_host_char* host_path_buf, DWORD buf_size)
 {
     const char* remainder = NULL;
@@ -689,8 +739,10 @@ BOOL xbox_translate_path(const char* xbox_path, xbox_host_char* host_path_buf, D
     if (!s_initialized)
         xbox_path_init(NULL, NULL);
 
-    if (title_dir_path(xbox_path, host_path_buf, buf_size))
+    if (title_dir_path(xbox_path, host_path_buf, buf_size)) {
+        resolve_case(host_path_buf, buf_size);
         return TRUE;
+    }
 
     {
         char linked[512];
@@ -713,6 +765,7 @@ BOOL xbox_translate_path(const char* xbox_path, xbox_host_char* host_path_buf, D
     snprintf(host_path_buf, buf_size, "%s", xbox_path);
     for (char* p = host_path_buf; *p; p++)
         if (*p == '\\') *p = '/';
+    resolve_case(host_path_buf, buf_size);
     return TRUE;
 
 translate:
@@ -742,6 +795,7 @@ translate:
                 host_path_buf[--n] = '\0';
         }
 
+        resolve_case(host_path_buf, buf_size);
         XBOX_TRACE(XBOX_LOG_PATH, "%s -> %s", xbox_path, host_path_buf);
         return TRUE;
     }
