@@ -11,6 +11,15 @@ if(FILE_READ_OBSERVER_IO_TEST)
   if(TARGET xboxrecomp)
     add_executable(file_read_io_test test_io.c)
     target_link_libraries(file_read_io_test PRIVATE xboxrecomp)
+  elseif(MSVC)
+    # Ordinary host-file I/O needs no GPU/SDL/title integration. Function-level
+    # sections discard unrelated kernel entry points from this focused check.
+    add_executable(file_read_io_test test_io.c log_stubs.c "${KERNEL_DIR}/kernel_file.c"
+      "${KERNEL_DIR}/file_read_observer.c" "${KERNEL_DIR}/kernel_overlay.c")
+    target_include_directories(file_read_io_test PRIVATE "${KERNEL_DIR}/..")
+    target_compile_definitions(file_read_io_test PRIVATE FILE_READ_OBSERVER_FOCUSED WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS)
+    target_compile_options(file_read_io_test PRIVATE /Gy)
+    target_link_options(file_read_io_test PRIVATE /OPT:REF)
   elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_subdirectory(../../src/platform platform)
     add_executable(file_read_io_test test_io.c log_stubs.c "${KERNEL_DIR}/kernel_file.c" "${KERNEL_DIR}/file_read_observer.c")

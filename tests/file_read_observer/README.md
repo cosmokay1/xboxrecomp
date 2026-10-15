@@ -22,7 +22,8 @@ ctest --test-dir build-observer -C Release --output-on-failure
 
 `-DFILE_READ_OBSERVER_IO_TEST=ON` also tests real kernel reads, short reads, EOF,
 invalid handles, missing status blocks, nested reads and completion-event order.
-Linux uses a focused platform/kernel link without SDL. On Windows, configure
-against the full runtime (SDL is required), or add this test directory to an
-existing project that already provides the `xboxrecomp` target. Default Windows
-CI covers dispatch only; real Windows I/O needs the integration configuration.
+Linux and MSVC Windows use focused platform/kernel links without SDL or title
+assets. Adding this test directory to a project that already provides the
+`xboxrecomp` target tests the full-runtime link instead. Both CI jobs cover
+actual kernel I/O as well as dispatch. Other Windows toolchains can use the
+full-runtime configuration with its SDL dependency.
