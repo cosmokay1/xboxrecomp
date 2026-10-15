@@ -881,6 +881,15 @@ NTSTATUS __stdcall xbox_NtCreateFile(
     }
 
     int fd;
+    {   /* A partition device opened as a directory (a free-space query) maps
+         * to its image file; answer with the directory that holds it, as the
+         * Windows version does. */
+        struct stat dst;
+        if ((CreateOptions & XBOX_FILE_DIRECTORY_FILE) && stat(host_path, &dst) == 0 && S_ISREG(dst.st_mode)) {
+            char *slash = strrchr(host_path, '/');
+            if (slash && slash != host_path) *slash = 0;
+        }
+    }
     if (CreateOptions & XBOX_FILE_DIRECTORY_FILE) {
         if (CreateDisposition == XBOX_FILE_CREATE || CreateDisposition == XBOX_FILE_OPEN_IF)
             mkdir(host_path, 0755);   /* EEXIST is fine */
