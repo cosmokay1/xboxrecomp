@@ -12,10 +12,11 @@ if(FILE_READ_OBSERVER_IO_TEST)
     add_executable(file_read_io_test test_io.c)
     target_link_libraries(file_read_io_test PRIVATE xboxrecomp)
   elseif(MSVC)
-    # Ordinary host-file I/O needs no GPU/SDL/title integration. Function-level
-    # sections discard unrelated kernel entry points from this focused check.
+    # Use the I/O backend's own path, overlay and lock dependencies without
+    # requiring GPU/SDL/title integration.
     add_executable(file_read_io_test test_io.c log_stubs.c "${KERNEL_DIR}/kernel_file.c"
-      "${KERNEL_DIR}/file_read_observer.c" "${KERNEL_DIR}/kernel_overlay.c")
+      "${KERNEL_DIR}/file_read_observer.c" "${KERNEL_DIR}/kernel_overlay.c"
+      "${KERNEL_DIR}/kernel_path.c" "${KERNEL_DIR}/kernel_io.c" "${KERNEL_DIR}/xbox_ggl.c")
     target_include_directories(file_read_io_test PRIVATE "${KERNEL_DIR}/..")
     target_compile_definitions(file_read_io_test PRIVATE FILE_READ_OBSERVER_FOCUSED WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS)
     target_compile_options(file_read_io_test PRIVATE /Gy)
