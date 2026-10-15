@@ -414,12 +414,16 @@ HANDLE w32_open_handle(int fd, const char *host_path)
 
 int w32_handle_fd(HANDLE h)
 {
+    if (!h || h == INVALID_HANDLE_VALUE || h == PSEUDO_CURRENT_THREAD || h == PSEUDO_CURRENT_PROCESS)
+        return -1;
     w32_object *o = (w32_object *)h;
     return (o && o->kind == K_FILE) ? o->fd : -1;
 }
 
 const char *w32_handle_path(HANDLE h)
 {
+    if (!h || h == INVALID_HANDLE_VALUE || h == PSEUDO_CURRENT_THREAD || h == PSEUDO_CURRENT_PROCESS)
+        return NULL;
     w32_object *o = (w32_object *)h;
     return (o && o->kind == K_FILE) ? o->file_path : NULL;
 }
