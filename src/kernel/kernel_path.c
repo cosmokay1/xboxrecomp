@@ -15,6 +15,7 @@
 #include "kernel.h"
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 #include <ctype.h>
 
 /*
@@ -640,6 +641,41 @@ void xbox_path_init(const char* game_dir, const char* save_dir)
              s_game_dir, s_save_dir);
 }
 
+/* Folders a title maps under the disc: "D:\\<name>\\..." and
+ * "\\Device\\CdRom0\\<name>\\..." open files in a host folder of the
+ * title's choosing (NFL 2K5's added teams, mods/teams). Windows version above. */
+static struct { char name[32]; char host[MAX_PATH]; } s_title_dirs[8];
+static int s_title_dir_count;
+
+void xbox_path_map_disc_dir(const char *name, const char *host_dir)
+{
+    if (s_title_dir_count >= 8 || !name || !host_dir) return;
+    snprintf(s_title_dirs[s_title_dir_count].name, sizeof s_title_dirs[0].name, "%s", name);
+    snprintf(s_title_dirs[s_title_dir_count].host, sizeof s_title_dirs[0].host, "%s", host_dir);
+    for (char *p = s_title_dirs[s_title_dir_count].host; *p; p++) if (*p == '\\') *p = '/';
+    s_title_dir_count++;
+}
+
+static int title_dir_path(const char *xbox_path, char *out, DWORD n)
+{
+    static const char *const disc[] = { "D:\\", "\\??\\D:\\", "\\Device\\CdRom0\\" };
+    for (int k = 0; k < 3; k++) {
+        int skip = match_prefix(xbox_path, disc[k]);
+        if (!skip) continue;
+        for (int i = 0; i < s_title_dir_count; i++) {
+            size_t ln = strlen(s_title_dirs[i].name);
+            const char *rest = xbox_path + skip;
+            if (strncasecmp(rest, s_title_dirs[i].name, ln) || (rest[ln] != '\\' && rest[ln] != 0)) continue;
+            rest += ln;
+            if (*rest == '\\') rest++;
+            snprintf(out, n, "%s/%s", s_title_dirs[i].host, rest);
+            for (char *p = out; *p; p++) if (*p == '\\') *p = '/';
+            return 1;
+        }
+    }
+    return 0;
+}
+
 BOOL xbox_translate_path(const char* xbox_path, xbox_host_char* host_path_buf, DWORD buf_size)
 {
     const char* remainder = NULL;
@@ -652,6 +688,9 @@ BOOL xbox_translate_path(const char* xbox_path, xbox_host_char* host_path_buf, D
 
     if (!s_initialized)
         xbox_path_init(NULL, NULL);
+
+    if (title_dir_path(xbox_path, host_path_buf, buf_size))
+        return TRUE;
 
     {
         char linked[512];
@@ -758,6 +797,53 @@ char *xbox_user_path(const char *rel, char *out, size_t n)
     if (GetFileAttributesA(out) == INVALID_FILE_ATTRIBUTES && GetFileAttributesA(rel) != INVALID_FILE_ATTRIBUTES &&
         !(GetFileAttributesA(rel) & FILE_ATTRIBUTE_DIRECTORY))
         CopyFileA(rel, out, TRUE);                 /* one-time migration of an existing file */
+    return out;
+}
+#else
+/* POSIX: same contract. `rel` may use backslashes. */
+#include <sys/stat.h>
+static char s_user_dir[MAX_PATH];
+
+void xbox_set_user_dir(const char *dir)
+{
+    if (dir && *dir) {
+        snprintf(s_user_dir, sizeof s_user_dir, "%s", dir);
+        for (char *p = s_user_dir; *p; p++) if (*p == '\\') *p = '/';
+        mkdir(s_user_dir, 0755);
+    } else
+        s_user_dir[0] = 0;
+}
+
+const char *xbox_user_dir(void) { return s_user_dir; }
+
+static int user_copy_once(const char *from, const char *to)
+{
+    FILE *in = fopen(from, "rb"), *out;
+    char buf[65536];
+    size_t n;
+    if (!in) return 0;
+    out = fopen(to, "wbx");
+    if (!out) { fclose(in); return 0; }
+    while ((n = fread(buf, 1, sizeof buf, in)) > 0) fwrite(buf, 1, n, out);
+    fclose(in);
+    return fclose(out) == 0;
+}
+
+char *xbox_user_path(const char *rel, char *out, size_t n)
+{
+    char relp[MAX_PATH];
+    struct stat st;
+    snprintf(relp, sizeof relp, "%s", rel);
+    for (char *p = relp; *p; p++) if (*p == '\\') *p = '/';
+    if (!s_user_dir[0]) {
+        snprintf(out, n, "%s", relp);
+        return out;
+    }
+    snprintf(out, n, "%s/%s", s_user_dir, relp);
+    for (char *p = out + 1; *p; p++)
+        if (*p == '/') { *p = 0; mkdir(out, 0755); *p = '/'; }
+    if (stat(out, &st) != 0 && stat(relp, &st) == 0 && !S_ISDIR(st.st_mode))
+        user_copy_once(relp, out);              /* one-time migration of an existing file */
     return out;
 }
 #endif

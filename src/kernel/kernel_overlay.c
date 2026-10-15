@@ -264,4 +264,12 @@ int xbox_overlay_path_size(const WCHAR *win_path, LONGLONG *size)
     *size = (LONGLONG)s_files[fi].size;
     return 1;
 }
+#else
+/* POSIX: mod-pack disc overlays are not implemented yet; retail disc files
+ * are served unchanged. TODO(posix): port the extent reader above. */
+int xbox_overlay_load(const char *dir, const char *disc)
+{
+    (void)dir; (void)disc;
+    return 0;
+}
 #endif /* _WIN32 */
