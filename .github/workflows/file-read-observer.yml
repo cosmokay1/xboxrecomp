@@ -1,0 +1,30 @@
+name: File read observer
+on:
+  push:
+    branches: [codex/file-read-observer]
+  pull_request:
+    paths:
+      - 'src/kernel/file_read_observer.*'
+      - 'src/kernel/kernel_file.c'
+      - 'src/kernel/CMakeLists.txt'
+      - 'tests/file_read_observer/**'
+      - '.github/workflows/file-read-observer.yml'
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            io: 'ON'
+          - os: windows-2022
+            io: 'OFF'
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure asset-free observer checks
+        run: cmake -S tests/file_read_observer -B build-observer -DFILE_READ_OBSERVER_IO_TEST=${{ matrix.io }}
+      - name: Build
+        run: cmake --build build-observer --config Release
+      - name: Check dispatch and supported platform I/O
+        run: ctest --test-dir build-observer -C Release --output-on-failure

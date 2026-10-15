@@ -10,6 +10,7 @@ set(KERNEL_SOURCES
     kernel_rtl.c
     kernel_memory.c
     kernel_file.c
+    file_read_observer.c
     kernel_overlay.c
     kernel_thread.c
     xbox_ggl.c

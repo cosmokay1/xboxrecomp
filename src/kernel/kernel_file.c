@@ -16,6 +16,7 @@
 
 #define _GNU_SOURCE   /* FNM_CASEFOLD */
 #include "kernel.h"
+#include "file_read_observer.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -256,11 +257,16 @@ NTSTATUS __stdcall xbox_NtReadFile(
     LARGE_INTEGER a, b;
     NTSTATUS st;
     QueryPerformanceCounter(&a);
-    st = xbox_NtReadFile_impl(FileHandle, Event, ApcRoutine, ApcContext, IoStatusBlock, Buffer, Length, ByteOffset);
+    /* Keep completion waiters asleep while the synchronous observer borrows
+     * the read handle/buffer. Only the original success case signals Event. */
+    st = xbox_NtReadFile_impl(FileHandle, NULL, ApcRoutine, ApcContext, IoStatusBlock, Buffer, Length, ByteOffset);
     QueryPerformanceCounter(&b);
     InterlockedAdd64(&g_xbox_read_qpc, b.QuadPart - a.QuadPart);
     InterlockedAdd64(&g_xbox_read_bytes, Length);
     InterlockedIncrement64(&g_xbox_read_count);
+    xbox_file_read_notify((uintptr_t)FileHandle, Buffer, Length,
+        st == STATUS_SUCCESS && IoStatusBlock ? (size_t)IoStatusBlock->Information : 0, st);
+    if (st == STATUS_SUCCESS && Event) SetEvent(Event);
     return st;
 }
 
@@ -924,7 +930,7 @@ NTSTATUS __stdcall xbox_NtCreateFile(
     return STATUS_SUCCESS;
 }
 
-NTSTATUS __stdcall xbox_NtReadFile(
+static NTSTATUS xbox_NtReadFile_posix(
     HANDLE FileHandle, HANDLE Event, PIO_APC_ROUTINE ApcRoutine, PVOID ApcContext,
     PXBOX_IO_STATUS_BLOCK IoStatusBlock, PVOID Buffer, ULONG Length,
     PLARGE_INTEGER ByteOffset)
@@ -958,6 +964,19 @@ NTSTATUS __stdcall xbox_NtReadFile(
     IoStatusBlock->Status = STATUS_SUCCESS;
     if (Event) SetEvent(Event);
     return STATUS_SUCCESS;
+}
+
+NTSTATUS __stdcall xbox_NtReadFile(
+    HANDLE FileHandle, HANDLE Event, PIO_APC_ROUTINE ApcRoutine, PVOID ApcContext,
+    PXBOX_IO_STATUS_BLOCK IoStatusBlock, PVOID Buffer, ULONG Length,
+    PLARGE_INTEGER ByteOffset)
+{
+    NTSTATUS status = xbox_NtReadFile_posix(FileHandle, NULL, ApcRoutine, ApcContext,
+                                          IoStatusBlock, Buffer, Length, ByteOffset);
+    xbox_file_read_notify((uintptr_t)FileHandle, Buffer, Length,
+        status == STATUS_SUCCESS && IoStatusBlock ? (size_t)IoStatusBlock->Information : 0, status);
+    if (status == STATUS_SUCCESS && Event) SetEvent(Event);
+    return status;
 }
 
 NTSTATUS __stdcall xbox_NtWriteFile(
