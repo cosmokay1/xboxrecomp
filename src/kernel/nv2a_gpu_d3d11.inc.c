@@ -1654,6 +1654,9 @@ static const XfVert *gpu_vertex_2d(uint32_t index)
     return x;
 }
 
+#include "nv2a_gpu_capture.inc.c"
+#include "nv2a_gpu_shadow_box.inc.c"
+
 /* RECOMP_TRI_DUMP=<texture hex>,<ms>: after that many ms, write every CPU-
  * transformed triangle drawn with that texture during one frame to
  * logs\tridump.txt (x y z w per corner, then the draw's vp start). */
@@ -1781,6 +1784,7 @@ static int gpu_draw_batch_unlocked_body(int flat2d)
     uint32_t vp_nverts = 0;
     LARGE_INTEGER cpu_vp_t0 = { 0 }, cpu_vp_t1;
     int profile_cpu_vp = 0;
+    int capture_cpu;
 
     if (!gpu_enabled() || !gpu_init())
         return 0;
@@ -1790,10 +1794,12 @@ static int gpu_draw_batch_unlocked_body(int flat2d)
     surf = &s_gpu11.surf[si];
     rw = surf->w; rh = surf->h;
     g_draw_ox = surf->ox;
+    capture_cpu = gpu_capture_begin(flat2d,surf);
 
 #define GPU_TRI(a_, b_, c_) do { \
         const XfVert *A_ = get(ix[a_]), *B_ = get(ix[b_]), *C_ = get(ix[c_]); \
         gpu_tri_dump(A_, B_, C_, ix[a_], ix[b_], ix[c_]); \
+        gpu_capture_triangle(A_, B_, C_, ix[a_], ix[b_], ix[c_]); \
         if (A_->ok && B_->ok && C_->ok && nv + 3 <= GPU_MAX_VERTS) { \
             gpu_vertex(&s_gpu11.verts[nv++], A_, rw, rh); \
             gpu_vertex(&s_gpu11.verts[nv++], B_, rw, rh); \
@@ -1815,7 +1821,7 @@ static int gpu_draw_batch_unlocked_body(int flat2d)
         get = vp_vertex;
         vp_begin_batch();
         s_vp.batches++;
-        if (gpu_vp_enabled())
+        if (!capture_cpu && gpu_vp_enabled())
             vpvs = gpu_vp_shader();
     }
     if (vpvs) {
@@ -2346,6 +2352,7 @@ static int gpu_draw_batch_unlocked_body(int flat2d)
             ID3D11DeviceContext_DrawIndexed(s_gpu11.ctx, nv, s_vp_start_index, s_vp_base_vertex);
         else
             ID3D11DeviceContext_Draw(s_gpu11.ctx, nv, first_vertex);
+        gpu_shadow_box_draw(flat2d,surf);
         if (s_dp_on) s_dp_acc[3] += __rdtsc() - dp_state0;   /* includes upload+bind; subtracted below */
         gpu_debug_drain(flat2d ? "draw2d" : "draw");
         /* RECOMP_GPU_PICK=x,y: in a traced frame (one in 300), read that
@@ -2500,6 +2507,7 @@ static void gpu_flip_unlocked(void)
     int i;
     if (!s_gpu11.ok)
         return;
+    gpu_capture_finish();
     /* Present straight from the render target (nv2a_gpu_present.inc.c).
      * Then nothing needs the frame in guest RAM unless a screenshot or dump
      * reads it there; render-to-texture and the software paths fetch what
